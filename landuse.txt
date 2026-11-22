@@ -1,0 +1,61 @@
+// ================= Configuration =================
+
+// Replace 'data' with your actual ROI asset ID.
+var roiAsset = 'data';
+var roi = ee.FeatureCollection(roiAsset);
+Map.centerObject(roi, 10);
+
+// Export resolution: 10 m recommended (native resolution).
+// If the file is too large, change to 20 m.
+var exportScale = 10;
+
+// ================= Core processing =================
+
+// Dynamic World class definitions (original):
+// 0: Water, 1: Trees, 2: Grass, 3: Flooded Veg, 4: Crops,
+// 5: Shrub, 6: Built, 7: Bare, 8: Snow
+
+var years = [2019, 2020, 2021, 2022, 2023, 2024, 2025];
+var exportFolder = 'data';
+
+for (var i = 0; i < years.length; i++) {
+  var year = years[i];
+  var start = year + '-01-01';
+  var end = year + '-12-31';
+
+  // 1. Get the Dynamic World dataset
+  var dwCol = ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1")
+      .filterBounds(roi)
+      .filterDate(start, end);
+
+  // 2. Compute the annual mode
+  // This step calculates the most frequent class at each location during the year.
+  var classification = dwCol.select('label').mode().clip(roi);
+
+  // 3. Export task
+  // Note: this exports the label band (integer values 0-8), not a color image.
+  Export.image.toDrive({
+    image: classification,
+    description: 'LandUse_Class_Raw_' + year,
+    folder: exportFolder,
+    region: roi,
+    scale: exportScale,
+    maxPixels: 1e13,
+    fileFormat: 'GeoTIFF'
+  });
+
+  // 4. Simple preview in GEE (random palette, only for checking gaps)
+  if (year === 2025) {
+    var dwVisParams = {
+      min: 0,
+      max: 8,
+      palette: [
+        '419BDF', '397D49', '88B053', '7A87C6', 'E49635',
+        'DFC35A', 'C4281B', 'A59B8F', 'B39FE1'
+      ]
+    };
+    Map.addLayer(classification, dwVisParams, 'LandUse 2025 Raw Preview');
+  }
+}
+
+print("Land use classification data export tasks have been generated. Please download them.");

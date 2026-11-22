@@ -1,0 +1,74 @@
+// ================= Configuration =================
+
+// Replace 'data' with your actual ROI asset ID.
+var roiAsset = 'data';
+var roi = ee.FeatureCollection(roiAsset);
+Map.centerObject(roi, 10);
+
+// Resolution settings:
+
+var exportScale = 10;
+
+// Visualization parameters (true color)
+// gamma: 1.5 makes the image brighter and more vivid, suitable for basemaps.
+var visParams = {
+  bands: ['B4', 'B3', 'B2'],
+  min: 0,
+  max: 0.3,
+  gamma: 1.5
+};
+
+// ================= Utility functions =================
+
+// Sentinel-2 cloud masking function
+function maskS2clouds(image) {
+  var qa = image.select('QA60');
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+  return image.updateMask(mask).divide(10000);
+}
+
+// ================= Main loop: export yearly images =================
+
+var years = [2019, 2020, 2021, 2022, 2023, 2024, 2025];
+var exportFolder = 'data';
+
+for (var i = 0; i < years.length; i++) {
+  var year = years[i];
+  var start = year + '-01-01';
+  var end = year + '-12-31';
+
+  // 1. Get the image collection for the given year
+  var collection = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+      .filterBounds(roi)
+      .filterDate(start, end)
+      .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)) // Filter out images with too much cloud
+      .map(maskS2clouds);
+
+  // 2. Median composite (generate a clean basemap)
+  var medianImage = collection.median().clip(roi);
+
+  // 3. Convert the image to an RGB visualization image (3 bands, uint8 format)
+  // This step is important: it converts reflectance values directly to 0-255 color values.
+  var rgbImage = medianImage.visualize(visParams);
+
+  // 4. Export task
+  Export.image.toDrive({
+    image: rgbImage,
+    description: 'Basemap_S2_RGB_' + year,
+    folder: exportFolder, // Recommended: use a separate folder for basemaps
+    region: roi,
+    scale: exportScale,
+    fileFormat: 'GeoTIFF',
+    maxPixels: 1e13
+  });
+
+  // 5. Map preview (only show the last year)
+  if (year === 2025) {
+    Map.addLayer(rgbImage, {}, 'Basemap 2025 Preview');
+  }
+}
+
+print("Basemap export tasks have been generated. Please click Run in the Tasks panel to download.");

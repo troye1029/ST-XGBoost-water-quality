@@ -1,0 +1,172 @@
+// ================= 1. Basic settings =================
+
+// 1.1 Study area (use your HighSensitivity SHP)
+var roiAsset = 'data';
+var roi = ee.FeatureCollection(roiAsset);
+
+// 1.2 Unified grid parameter (100 m)
+var modelGridScale = 100;
+
+// ================= 2. Static data sources =================
+
+// 2.1 Terrain
+var demAsset = 'dem';
+var dem = ee.Image(demAsset).select('elevation');
+var slope = ee.Terrain.slope(dem);
+
+// 2.2 Soil (temporarily removed to avoid errors)
+// var soilAsset = 'soil';
+// var soilClay = ee.Image(soilAsset).select('b0').rename('soil_clay');
+
+// 2.3 Long-term water frequency
+var jrcAsset = 'jrc';
+var jrc = ee.Image(jrcAsset).select('occurrence').rename('water_occurrence');
+
+// ================= 3. Core processing functions =================
+
+// Sentinel-2 cloud masking
+function maskS2clouds(image) {
+  var qa = image.select('QA60');
+  var mask = qa.bitwiseAnd(1 << 10).eq(0).and(qa.bitwiseAnd(1 << 11).eq(0));
+  return image.updateMask(mask).divide(10000);
+}
+
+// Extract all dynamic drivers by year
+function extractDrivers(year) {
+  var start = year + '-01-01';
+  var end = year + '-12-31';
+
+  // --- A. Dynamic land use (Dynamic World V1) ---
+  var dwAsset = 'dynamic_world';
+  var dwCol = ee.ImageCollection(dwAsset)
+    .filterDate(start, end)
+    .filterBounds(roi)
+    .select('label');
+
+  var dwYear = dwCol.mode();
+
+  var isCrop = dwYear.eq(4).rename('is_crop');
+  var isBuilt = dwYear.eq(6).rename('is_built');
+
+  // --- B. Meteorological data (ERA5 - dynamic) ---
+  var era5Asset = 'era5';
+  var era5 = ee.ImageCollection(era5Asset)
+    .filterDate(start, end)
+    .select(['temperature_2m', 'total_precipitation_hourly']);
+
+  var tempAvg = era5.select('temperature_2m').mean().subtract(273.15).rename('temp_avg');
+  var rainSum = era5.select('total_precipitation_hourly').sum().multiply(1000).rename('rain_sum');
+
+  // --- C. Human activity (VIIRS nighttime lights - dynamic) ---
+  var viirsAsset = 'viirs';
+  var viirs = ee.ImageCollection(viirsAsset)
+    .filterDate(start, end)
+    .select('avg_rad')
+    .mean()
+    .rename('night_light');
+
+  // --- D. Vegetation condition (Sentinel-2 NDVI - dynamic) ---
+  var s2Asset = 'sentinel2';
+  var s2 = ee.ImageCollection(s2Asset)
+    .filterDate(start, end)
+    .filterBounds(roi)
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+    .map(maskS2clouds);
+
+  var ndvi = s2.median().normalizedDifference(['B8', 'B4']).rename('ndvi');
+
+  // --- E. Spatial convolution (1 km buffer statistics) ---
+  var kernel = ee.Kernel.circle({radius: 1000, units: 'meters'});
+
+  // Neighborhood calculation
+  var lightBuffer = viirs.reduceNeighborhood({reducer: ee.Reducer.mean(), kernel: kernel}).rename('light_1km');
+  var ndviBuffer = ndvi.reduceNeighborhood({reducer: ee.Reducer.mean(), kernel: kernel}).rename('ndvi_1km');
+  var slopeBuffer = slope.reduceNeighborhood({reducer: ee.Reducer.mean(), kernel: kernel}).rename('slope_1km');
+  // var soilBuffer = soilClay.reduceNeighborhood({reducer: ee.Reducer.mean(), kernel: kernel}).rename('soil_1km');
+
+  // Dynamic land-use convolution
+  var cropBuffer = isCrop.reduceNeighborhood({reducer: ee.Reducer.mean(), kernel: kernel}).rename('crop_1km');
+  var builtBuffer = isBuilt.reduceNeighborhood({reducer: ee.Reducer.mean(), kernel: kernel}).rename('built_1km');
+
+  // --- F. Combination and grid alignment ---
+  var combined = ee.Image.cat([
+    tempAvg,
+    rainSum,
+    jrc,
+    dem.rename('dem'),
+    lightBuffer,
+    ndviBuffer,
+    cropBuffer,
+    builtBuffer,
+    // soilBuffer, // Removed
+    slopeBuffer
+  ]);
+
+  // Force reprojection to 100 m standard grid (EPSG:4326)
+  var aligned = combined.reproject({
+    crs: 'EPSG:4326',
+    scale: modelGridScale
+  });
+
+  return aligned.set('year', year);
+}
+
+// ================= 4. Execution loop and export =================
+
+var years = [2019, 2020, 2021, 2022, 2023, 2024, 2025];
+var exportFolder = 'data';
+
+var visParams = {
+  rain: {min: 800, max: 1500, palette: ['blue', 'cyan', 'green']},
+  crop: {min: 0, max: 1, palette: ['black', 'lightgreen', 'green']},
+  built: {min: 0, max: 0.5, palette: ['black', 'purple', 'red']}
+};
+
+for (var i = 0; i < years.length; i++) {
+  var year = years[i];
+
+  var driverImage = extractDrivers(year);
+  var driverImageClipped = driverImage.clip(roi);
+
+  // 4.2 Export CSV
+  Export.table.toDrive({
+    collection: driverImageClipped.sample({
+      region: roi,
+      scale: modelGridScale,
+      geometries: true,
+      dropNulls: true
+    }),
+    description: 'Drivers_X_Dynamic_100m_' + year,
+    folder: exportFolder,
+    fileFormat: 'CSV'
+  });
+
+  // 4.3 Export visualization images (2025 only)
+  if (year === 2025) {
+    Export.image.toDrive({
+      image: driverImageClipped.select('crop_1km'),
+      description: 'Vis_Cropland_Ratio_' + year,
+      folder: exportFolder,
+      region: roi,
+      scale: 100,
+      maxPixels: 1e13
+    });
+
+    Export.image.toDrive({
+      image: driverImageClipped.select('built_1km'),
+      description: 'Vis_Built_Ratio_' + year,
+      folder: exportFolder,
+      region: roi,
+      scale: 100,
+      maxPixels: 1e13
+    });
+  }
+}
+
+// Map preview
+var preview = extractDrivers(2025).clip(roi);
+Map.centerObject(roi, 10);
+Map.addLayer(preview.select('crop_1km'), visParams.crop, '2025 Cropland Ratio (1km Buffer)');
+Map.addLayer(preview.select('built_1km'), visParams.built, '2025 Built Ratio (1km Buffer)');
+
+print('Driver extraction tasks regenerated');
