@@ -2,7 +2,7 @@
 Spatio-temporal prediction and future scenario analysis of heterogeneous water quality indicators
 in the Huaihe River Basin using adaptive machine learning.
 
-The Google Earth Engine scripts in `GEE code/` build the predictor table from open archives —
+The Google Earth Engine scripts in `GEE_code/` build the predictor table from open archives —
 Sentinel-2 Level-2A for NDCI, NDTI, FUI and NDVI, ERA5-Land for temperature and precipitation,
 Dynamic World for cropland and built-up fractions, VIIRS for night lights, NASADEM for terrain and
 JRC for water occurrence — and export one 100 m CSV per year for 2019-2025. `basemap.txt` and
